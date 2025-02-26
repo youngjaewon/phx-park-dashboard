@@ -1,0 +1,1226 @@
+---
+title: "Green Space Access and Use in Phoenix, AZ"
+output: 
+  flexdashboard::flex_dashboard:
+    source: embed
+    smart: false
+runtime: shiny
+---
+
+```{r global, echo=F}
+
+# PACKAGES 
+
+
+# dashboard layout, widgets, and uploading
+
+library( flexdashboard )
+library( shiny )
+library( rsconnect )
+
+# data wrangling 
+
+library( dplyr )
+
+
+# formatting output
+
+library( DT )
+library( pander )
+library( knitr )
+library( stargazer )
+
+
+# maps
+
+library( ggmap )
+library( leaflet )
+library( viridis )
+library( geojsonio )
+library( sp )
+library( sf )
+library( tmap )
+library( pals )
+library( plotly )
+library( highcharter )
+
+
+```
+
+
+```{r, include=FALSE}
+
+# DATA STEPS 
+
+library(sp)
+library(sf)
+
+# Corrected raw GitHub URL pointing to the RDS file
+github.url <- "https://github.com/youngjaewon/dashboard/raw/refs/heads/main/combined.rds"
+tpl.parks.url <- "https://github.com/youngjaewon/dashboard/raw/refs/heads/main/TplParksCleaned.rds"
+
+# Read the RDS file from the GitHub URL using a connection
+phx <- readRDS(url(github.url))
+parks <- readRDS(url(tpl.parks.url))
+
+# Check the coordinate reference system (CRS) of the spatial object
+st_crs(phx)
+
+# Transform the spatial object to use the WGS 84 CRS (EPSG: 4326), which is commonly used for geographic coordinates
+phx <- st_transform(phx, crs = 4326)
+
+# Convert the spatial object into a regular data frame, separating out non-spatial attributes
+d <- as.data.frame(phx)
+
+
+```
+
+
+Parks and Neighborhoods
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+```{r}
+# Define the variable names
+var_names_neighborhood <- c("pop", "pop_density", "prop_nonwhite", "prop_latino", "per_cap_income", "prop_nohs",
+                     "med_age", "under18", "over65", "novehicle", "neighborhood_age")
+
+# Define the descriptive labels
+var_labels_neighborhood <- c(
+  "Population",
+  "Population density per square mile",
+  "% Non-white",
+  "% Hispanic",
+  "Per capita income ($)",
+  "% People without a high school diploma",
+  "Median age",
+  "% Children under 18",
+  "% People 65 and over",
+  "% Housing unit without a vehicle",
+  "Median year structure built"
+)
+
+# Create radio buttons with new input id
+radioButtons(
+  inputId = "var_name_neighborhood", 
+  label = h3("Census Variables (2019)"),
+  choiceNames = var_labels_neighborhood,
+  choiceValues = var_names_neighborhood,
+  selected = "pop_density"             # Default selection
+)
+
+# Add the refresh button in the sidebar
+actionButton("refresh_map1", "Refresh Map")
+
+```
+
+<br>
+Use the __Parks and Neighborhoods__ tab to explore the spatial distribution of parks alongside key neighborhood attributes for Phoenix, AZ. The choropleth map visualizes your chosen census variable, with color intensity reflecting its value. Click on a block group on the map to highlight it and generate detailed demographic charts. Interact with the map and associated plots to gain insights into how park resources and neighborhood characteristics vary across Phoenix.
+
+To learn more about the project, click the __About__ tab.  
+
+Data sources: Trust for Public Land’s 2019 [ParkServe](https://www.tpl.org/parkserve/about), U.S. Census Bureau’s [ACS](https://www.census.gov/programs-surveys/acs) 2015–2019 5-year estimates
+
+
+Row {data-height=650}
+-------------------------------------
+### Choropleth Map
+```{r}
+
+# Initial rendering of the map for Parks and Neighborhoods
+output$map_neighborhood <- renderLeaflet({
+  leaflet(phx) %>% 
+    setView(lng = -112, lat = 33.4484, zoom = 10) %>%
+    addProviderTiles('CartoDB.Positron') %>%
+    addMapPane("highlightPane", zIndex = 500) %>%
+    addMapPane("parksPane", zIndex = 420) %>%
+    # Add the Parks layer (static)
+    addPolygons(
+      data = parks,
+      group = "Parks",
+      color = "green",
+      fillColor = "green",
+      fillOpacity = 0.5,
+      weight = 2,
+      options = pathOptions(pane = "parksPane"),
+      popup = ~paste("Park Name:", Park_Name)
+    ) %>%
+    addLayersControl(
+      overlayGroups = c("Parks"),
+      options = layersControlOptions(collapsed = FALSE)
+    )
+})
+
+# Define percentage variables
+percentage_vars <- c("prop_nonwhite", "prop_latino", "prop_nohs", "under18", "over65", "novehicle")
+
+# Observer to update the "choropleth" layer when the selected census variable changes
+observe({
+  req(input$var_name_neighborhood)
+  
+  # For novehicle, filter out NA rows; otherwise use full dataset
+  data_to_plot <- phx
+  if (input$var_name_neighborhood == "novehicle") {
+    data_to_plot <- data_to_plot[!is.na(data_to_plot$novehicle), ]
+  }
+  
+  # Calculate adjusted values based on the selected variable using the filtered data
+  if (input$var_name_neighborhood %in% c("pop", "per_cap_income", "med_age", "neighborhood_age")) {
+    decimal_adjusted_values <- data_to_plot[[input$var_name_neighborhood]]
+  } else if (input$var_name_neighborhood == "pop_density") {
+    decimal_adjusted_values <- round(data_to_plot[[input$var_name_neighborhood]], 0)
+  } else if (input$var_name_neighborhood %in% percentage_vars) {
+    # Multiply percentage variables by 100 and round to one decimal
+    decimal_adjusted_values <- round(data_to_plot[[input$var_name_neighborhood]] * 100, 1)
+  } else {
+    decimal_adjusted_values <- round(data_to_plot[[input$var_name_neighborhood]], 1)
+  }
+  
+  # Get the corresponding label for the selected variable
+  selected_label <- var_labels_neighborhood[which(var_names_neighborhood == input$var_name_neighborhood)]
+  
+  # Create the color palette
+  if (input$var_name_neighborhood %in% percentage_vars) {
+    pal <- colorNumeric(palette = "Reds", domain = c(0, 100), na.color = "#808080")
+  } else {
+    bins <- if (input$var_name_neighborhood == "novehicle") {
+      quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 4), na.rm = TRUE) %>% round(0)
+    } else {
+      quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 9), na.rm = TRUE) %>% round(0)
+    }
+    if (input$var_name_neighborhood == "neighborhood_age") {
+      pal <- colorBin('Reds', domain = decimal_adjusted_values, bins = bins,
+                      na.color = "#808080", reverse = TRUE)
+    } else {
+      pal <- colorBin('Reds', domain = decimal_adjusted_values, bins = bins,
+                      na.color = "#808080")
+    }
+  }
+  
+  # Create popup content for each polygon
+  popup_contents <- sprintf(
+    "<div style='font-size: 15px;'><strong>Block Group ID: %s</strong><br/>%g</div>",
+    data_to_plot$GEOID, decimal_adjusted_values
+  ) %>% lapply(htmltools::HTML)
+  
+  # Update only the choropleth layer
+  leafletProxy("map_neighborhood") %>%
+    clearGroup("choropleth") %>%  # Remove existing choropleth polygons
+    addPolygons(data = data_to_plot,
+                group = "choropleth",
+                stroke = TRUE,
+                smoothFactor = 0,
+                weight = 0.5,
+                opacity = 0.7,
+                color = "gray",
+                fillColor = ~pal(decimal_adjusted_values),
+                fillOpacity = 0.7,
+                layerId = ~GEOID,
+                highlightOptions = highlightOptions(
+                  stroke = TRUE,
+                  weight = 1.6,
+                  opacity = 1,
+                  color = "#00FFFF",
+                  bringToFront = TRUE),
+                popup = popup_contents,
+                popupOptions = popupOptions(closeButton = TRUE)
+    ) %>%
+    clearControls() %>%  # Clear any existing legend
+    addLegend(position = 'topright',
+              pal = pal,
+              values = decimal_adjusted_values,
+              title = selected_label,
+              labFormat = switch(input$var_name_neighborhood,
+                                 "neighborhood_age" = labelFormat(big.mark = ""),
+                                 "pop" = labelFormat(big.mark = ","),
+                                 labelFormat()))
+})
+
+# Click event for the map
+click_blockgroup_neighborhood <- eventReactive(input$map_neighborhood_shape_click, {
+  x <- input$map_neighborhood_shape_click
+  y <- x$id
+  return(y)
+})
+
+blockgroup_ids_nhbd <- reactive({
+  eventdata <- event_data("plotly_selected", source = "source")
+  if (is.null(eventdata)) {
+    return(NULL)  # do nothing
+  } else {
+    blockgroups <- eventdata$key
+    return(blockgroups)
+  }
+})
+
+observe({
+  req(blockgroup_ids_nhbd())
+  proxy_nbhd <- leafletProxy('map_neighborhood')
+  sub_nbhd <- phx %>% filter(GEOID %in% blockgroup_ids_nhbd())
+  box_nbhd <- st_bbox(sub_nbhd) %>% as.vector()
+  
+  # Clear old selection on map, and add new selection
+  proxy_nbhd %>%
+    clearGroup(group = 'sub_nbhd') %>%
+    addPolygons(data = sub_nbhd, fill = FALSE, color = '#FFFF00',
+                opacity = 1, group = 'sub_nbhd', weight = 1.5) %>%
+    fitBounds(lng1 = box_nbhd[1],
+              lat1 = box_nbhd[2],
+              lng2 = box_nbhd[3],
+              lat2 = box_nbhd[4])
+})
+
+observeEvent(click_blockgroup_neighborhood(), {
+  leafletProxy('map_neighborhood') %>%
+    removeShape('htract') %>%
+    addPolygons(
+      data = filter(phx, GEOID == click_blockgroup_neighborhood()),
+      fill = FALSE,
+      color = '#00FFFF',
+      opacity = 1,
+      layerId = 'htract', 
+      weight = 1.6,
+      options = pathOptions(pane = "highlightPane")
+    )
+})
+
+blockgroup_data_neighborhood <- reactive({
+  req(click_blockgroup_neighborhood())
+  filter(phx, GEOID == click_blockgroup_neighborhood())
+})
+
+# Place the UI output for the map
+leafletOutput("map_neighborhood")
+
+# Observer triggered by the refresh button
+observeEvent(input$refresh_map1, {
+  req(input$var_name_neighborhood)
+  
+  # Filter out NA for novehicle if needed
+  data_to_plot <- phx
+  if (input$var_name_neighborhood == "novehicle") {
+    data_to_plot <- data_to_plot[!is.na(data_to_plot$novehicle), ]
+  }
+  
+  # Calculate adjusted values using the filtered data
+  if (input$var_name_neighborhood %in% c("pop", "per_cap_income", "med_age", "neighborhood_age")) {
+    decimal_adjusted_values <- data_to_plot[[input$var_name_neighborhood]]
+  } else if (input$var_name_neighborhood == "pop_density") {
+    decimal_adjusted_values <- round(data_to_plot[[input$var_name_neighborhood]], 0)
+  } else if (input$var_name_neighborhood %in% percentage_vars) {
+    decimal_adjusted_values <- round(data_to_plot[[input$var_name_neighborhood]] * 100, 1)
+  } else {
+    decimal_adjusted_values <- round(data_to_plot[[input$var_name_neighborhood]], 1)
+  }
+  
+  # Get the corresponding label for the selected variable
+  selected_label <- var_labels_neighborhood[which(var_names_neighborhood == input$var_name_neighborhood)]
+  
+  # Create the color palette:
+  if (input$var_name_neighborhood %in% percentage_vars) {
+    pal <- colorNumeric(palette = "Reds", domain = c(0, 100), na.color = "#808080")
+  } else {
+    bins <- if (input$var_name_neighborhood == "novehicle") {
+      quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 4), na.rm = TRUE) %>% round(0)
+    } else {
+      quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 9), na.rm = TRUE) %>% round(0)
+    }
+    if (input$var_name_neighborhood == "neighborhood_age") {
+      pal <- colorBin('Reds', domain = decimal_adjusted_values, bins = bins,
+                      na.color = "#808080", reverse = TRUE)
+    } else {
+      pal <- colorBin('Reds', domain = decimal_adjusted_values, bins = bins,
+                      na.color = "#808080")
+    }
+  }
+  
+  # Create popup content for each polygon
+  popup_contents <- sprintf(
+    "<div style='font-size: 15px;'><strong>Block Group ID: %s</strong><br/>%g</div>",
+    data_to_plot$GEOID, decimal_adjusted_values
+  ) %>% lapply(htmltools::HTML)
+  
+  # Update the choropleth layer and legend
+  leafletProxy("map_neighborhood") %>%
+    clearGroup("choropleth") %>%  # Remove existing choropleth polygons
+    clearControls() %>%           # Remove existing legend
+    setView(lng = -112, lat = 33.4484, zoom = 10) %>%
+    addPolygons(data = data_to_plot,
+                group = "choropleth",
+                stroke = TRUE,
+                smoothFactor = 0,
+                weight = 0.5,
+                opacity = 0.7,
+                color = "gray",
+                fillColor = ~pal(decimal_adjusted_values),
+                fillOpacity = 0.7,
+                layerId = ~GEOID,
+                highlightOptions = highlightOptions(
+                  stroke = TRUE,
+                  weight = 1.6,
+                  opacity = 1,
+                  color = "#00FFFF",
+                  bringToFront = TRUE),
+                popup = popup_contents,
+                popupOptions = popupOptions(closeButton = TRUE)
+    ) %>%
+    addLegend(position = 'topright',
+              pal = pal,
+              values = decimal_adjusted_values,
+              title = selected_label,
+              labFormat = switch(input$var_name_neighborhood,
+                                 "neighborhood_age" = labelFormat(big.mark = ""),
+                                 "pop" = labelFormat(big.mark = ","),
+                                 labelFormat()))
+})
+
+
+```
+
+
+Row {data-height=350}
+-------------------------------------
+### Histogram
+```{r}
+output$nbhdHist <- renderHighchart({
+  # Compute the adjusted values based on the selected variable
+  if (input$var_name_neighborhood %in% c("pop", "per_cap_income", "med_age", "neighborhood_age")) {
+    decimal_adjusted_values <- phx[[input$var_name_neighborhood]]
+  } else if (input$var_name_neighborhood == "pop_density") {
+    decimal_adjusted_values <- round(phx[[input$var_name_neighborhood]], 0)
+  } else {
+    decimal_adjusted_values <- round(phx[[input$var_name_neighborhood]] * 100, 1)
+  }
+  
+  selected_label <- var_labels_neighborhood[which(var_names_neighborhood == input$var_name_neighborhood)]
+  
+  h <- hist(decimal_adjusted_values, breaks = "Scott", plot = FALSE)
+  
+  data_points <- lapply(seq_along(h$counts), function(i) {
+    list(x = h$mids[i], y = h$counts[i])
+  })
+  
+  avg_val <- mean(decimal_adjusted_values, na.rm = TRUE)
+  
+  highchart() %>%
+    hc_chart(type = 'column') %>%
+    hc_title(text = selected_label, align = "left") %>%
+    hc_xAxis(
+      title = list(text = "Value"),
+      plotLines = list(
+        list(
+          value = avg_val,
+          color = "black",
+          width = 2,
+          dashStyle = "Solid",
+          zIndex = 10,
+          label = list(
+            text = "Average",
+            align = "left",
+            style = list(color = "black")
+          )
+        )
+      )
+    ) %>%
+    hc_yAxis(title = list(text = "Number of CBGs")) %>%
+    hc_add_series(name = "Frequency", data = data_points, color = "#007bc2") %>%
+    hc_tooltip(pointFormat = "Frequency: {point.y}") %>%
+    hc_legend(enabled = FALSE) %>%
+    hc_add_theme(hc_theme_smpl())
+})
+
+highchartOutput("nbhdHist")
+```
+
+
+### Selected Block Group Demographic Z-Scores (click on the map to display chart)
+```{r}
+output$varZscoreChartNhbd <- renderHighchart({
+  
+  req(blockgroup_data_neighborhood())
+  bd <- blockgroup_data_neighborhood()
+  
+  z_scores <- sapply(var_names_neighborhood, function(var) {
+    global_mean <- mean(phx[[var]], na.rm = TRUE)
+    global_sd <- sd(phx[[var]], na.rm = TRUE)
+    (bd[[var]] - global_mean) / global_sd
+  })
+  
+  highchart() %>%
+    hc_chart(type = 'bar') %>%
+    hc_title(text = paste0("Census Block Group ", bd$GEOID, " Z-Scores"), align = "left") %>%
+    hc_xAxis(categories = var_labels_neighborhood, 
+             title = list(text = "2019 Demographic Variables")) %>%
+    hc_yAxis(title = list(text = "Z Score"),
+             plotLines = list(list(color = "gray", width = 2, value = 0, zIndex = 3))) %>%
+    hc_add_series(name = "Z Score", data = as.numeric(z_scores), color = "#007bc2") %>%
+    hc_tooltip(pointFormat = "Z Score: {point.y:.2f}") %>%
+    hc_legend(enabled = FALSE) %>%
+    hc_credits(
+      enabled = TRUE,
+      text = "Note: Z Score is calculated as (x - mean) / standard deviation",
+      style = list(fontSize = "12px", color = "#000000", cursor = "default", pointerEvents = "none"),
+      position = list(align = "left", verticalAlign = "bottom", x = 10, y = -10),
+      href = NULL
+    ) %>%
+    hc_add_theme(hc_theme_smpl())
+})
+  
+highchartOutput("varZscoreChartNhbd")
+```
+
+
+
+Local Park Access and Use  
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r}
+
+phx$visits_pc <- phx$within_1km_visits / phx$pop
+
+# Define the variable names
+var_names_parks <- c("mindistance", "numparks", "sumacreage",
+               "visits_pc", "metro_ratio_1km_visits")
+
+# Define the descriptive labels
+var_labels_parks <- c(
+  "Distance to the closest park (meter)",
+  "Number of local parks",
+  "Total acreage of local parks (acre)",
+  "Per capita visits to local parks",
+  "Ratio of local to metro park visits (%)"
+)
+
+# Create radio buttons
+radioButtons(
+  inputId = "var_name_parks", 
+  label = h3("Access & Use Variables (2019)"),
+  choiceNames = var_labels_parks,   # Descriptive labels
+  choiceValues = var_names_parks,    # Corresponding variable names
+  selected = "mindistance"             # Default selection
+)
+
+# Add the refresh button in the sidebar
+actionButton("refresh_map2", "Refresh Map")
+
+```
+
+<br>
+Use the __Local Park Access and Use__ tab to investigate how residents access and utilize local parks in Phoenix, AZ. We defined *local parks* as parks within walking distance (i.e., 1 km) of a CBG (i.e., neighborhood). The interactive map highlights variations in park access and usage patterns across neighborhoods, with colors reflecting levels of park access and use. Click on a block group to highlight it and generate detailed charts that display key metrics of both park access and usage, helping you understand how access and use vary across the area.
+
+Data sources: Trust for Public Land’s 2019 [ParkServe](https://www.tpl.org/parkserve/about), SafeGraph's 2019 [Patterns](https://docs.safegraph.com/docs/monthly-patterns)
+
+
+
+Row {data-height=650}
+-------------------------------------
+
+### Choropleth Map
+
+```{r leaflet-map-parks, context="server"}
+
+# Initial rendering of the map (only performed once)
+output$map_parks <- renderLeaflet({
+  leaflet(phx) %>%
+    setView(lng = -112, lat = 33.4484, zoom = 10) %>%
+    addProviderTiles('CartoDB.Positron') %>%
+    addMapPane("parksPane", zIndex = 420) %>%
+    # Add the Parks layer once during initial render
+    addPolygons(
+      data = parks,
+      group = "Parks",
+      color = "green",
+      fillColor = "green",
+      fillOpacity = 0.5,
+      weight = 2,
+      options = pathOptions(pane = "parksPane"),
+      popup = ~paste("Park Name:", Park_Name)
+    ) %>%
+    addLayersControl(
+      overlayGroups = c("Parks"),
+      options = layersControlOptions(collapsed = FALSE)
+    )
+})
+
+# Observer to update the "choropleth" group when the selected variable changes
+observe({
+  req(input$var_name_parks)
+  
+  # Calculate the adjusted values based on the selected variable
+  decimal_adjusted_values <- if (input$var_name_parks == "mindistance") {
+    round(phx[[input$var_name_parks]], 0)
+  } else if (input$var_name_parks == "numparks") {
+    phx[[input$var_name_parks]]
+  } else if (input$var_name_parks == "sumacreage") {
+    round(phx[[input$var_name_parks]], 1)
+  } else if (input$var_name_parks == "metro_ratio_1km_visits") {
+    round(phx[[input$var_name_parks]] * 100, 1)
+  } else {
+    round(phx[[input$var_name_parks]], 1)
+  }
+  
+  # Get the corresponding label for the selected variable
+  selected_label <- var_labels_parks[which(var_names_parks == input$var_name_parks)]
+  
+  bins <- if (input$var_name_parks == "numparks") {
+    quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 6), na.rm = TRUE) %>% round(0)
+  } else if (input$var_name_parks == "visits_pc") {
+    quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 5), na.rm = TRUE) %>% round(1)
+  } else if (input$var_name_parks == "metro_ratio_1km_visits") {
+    quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 5), na.rm = TRUE) %>% round(1)
+  } else {
+    quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 6), na.rm = TRUE) %>% round(0)
+  }
+  
+  pal <- if (input$var_name_parks == "mindistance") {
+    colorBin('Blues', domain = decimal_adjusted_values, bins = bins,
+             na.color = "#808080", reverse = TRUE)
+  } else {
+    colorBin('Blues', domain = decimal_adjusted_values, bins = bins,
+             na.color = "#808080")
+  }
+  
+  popup_contents <- sprintf(
+    "<div style='font-size: 15px;'><strong>Block Group ID: %s</strong><br/>%g</div>",
+    phx$GEOID, decimal_adjusted_values
+  ) %>% lapply(htmltools::HTML)
+  
+  # Update only the choropleth layer:
+  leafletProxy("map_parks") %>%
+    clearGroup("choropleth") %>%  # Remove existing choropleth polygons
+    addPolygons(data = phx,
+                group = "choropleth",   # Assign new polygons to the "choropleth" group
+                stroke = TRUE,
+                smoothFactor = 0,
+                weight = 0.5,
+                opacity = 0.7,
+                color = "gray",
+                fillColor = ~pal(decimal_adjusted_values),
+                fillOpacity = 0.7,
+                layerId = ~GEOID,
+                highlightOptions = highlightOptions(
+                  stroke = TRUE,
+                  weight = 1.6,
+                  opacity = 1,
+                  color = "#00FFFF",
+                  bringToFront = TRUE),
+                popup = popup_contents,
+                popupOptions = popupOptions(closeButton = TRUE)
+    ) %>%
+    clearControls() %>%  # Clear existing legend
+    addLegend(position = 'topright', pal = pal, values = decimal_adjusted_values,
+              title = selected_label)
+})
+
+# Click event for the map (will use to generate chart)
+click_blockgroup_parks <- eventReactive(input$map_parks_shape_click, {
+    x <- input$map_parks_shape_click
+    y <- x$id
+    return(y)
+})
+
+blockgroup_ids_parks <- reactive({
+  req(click_blockgroup_parks())
+  eventdata <- event_data("plotly_selected", source = "source")
+  if (is.null(eventdata)) {
+    return(NULL) # do nothing
+  } else {
+    blockgroups <- eventdata$key
+    return(blockgroups)
+  }
+})
+
+observe({
+  req(blockgroup_ids_parks())
+  proxy_parks <- leafletProxy('map_parks')
+  sub_parks <- phx %>% filter(GEOID %in% blockgroup_ids_parks())
+  box_parks <- st_bbox(sub_parks) %>% as.vector()
+  
+  # Clear old selection on map, and add new selection
+  proxy_parks %>%
+    clearGroup(group = 'sub_parks') %>%
+    addPolygons(data = sub_parks, fill = FALSE, color = '#FFFF00',
+                 opacity = 1, group = 'sub_parks', weight = 1.5) %>%
+    fitBounds(lng1 = box_parks[1],
+              lat1 = box_parks[2],
+              lng2 = box_parks[3],
+              lat2 = box_parks[4])
+})
+
+observeEvent(click_blockgroup_parks(), {
+  leafletProxy('map_parks') %>%
+    removeShape('htract') %>%
+    addPolygons(
+      data = filter(phx, GEOID == click_blockgroup_parks()),
+      fill = FALSE,
+      color = '#00FFFF',
+      opacity = 1,
+      layerId = 'htract', 
+      weight = 1.6,
+      options = pathOptions(pane = "highlightPane")
+    )
+})
+
+blockgroup_data_parks <- reactive({
+  req(click_blockgroup_parks())
+  filter(phx, GEOID == click_blockgroup_parks())
+})
+
+# Place the UI output for the map
+leafletOutput("map_parks")
+
+
+observeEvent(input$refresh_map2, {
+  req(input$var_name_parks)
+  
+  # Calculate the adjusted values based on the selected variable
+  if (input$var_name_parks == "mindistance") {
+    decimal_adjusted_values <- round(phx[[input$var_name_parks]], 0)
+  } else if (input$var_name_parks == "numparks") {
+    decimal_adjusted_values <- phx[[input$var_name_parks]]
+  } else if (input$var_name_parks == "sumacreage") {
+    decimal_adjusted_values <- round(phx[[input$var_name_parks]], 1)
+  } else if (input$var_name_parks == "metro_ratio_1km_visits") {
+    decimal_adjusted_values <- round(phx[[input$var_name_parks]] * 100, 1)
+  } else {
+    decimal_adjusted_values <- round(phx[[input$var_name_parks]], 1)
+  }
+  
+  # Get the corresponding label for the selected variable
+  selected_label <- var_labels_parks[which(var_names_parks == input$var_name_parks)]
+  
+  # Determine bins for the color scale
+  if (input$var_name_parks == "numparks") {
+    bins <- quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 6), na.rm = TRUE) %>% round(0)
+  } else if (input$var_name_parks == "visits_pc") {
+    bins <- quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 5), na.rm = TRUE) %>% round(1)
+  } else if (input$var_name_parks == "metro_ratio_1km_visits") {
+    bins <- quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 5), na.rm = TRUE) %>% round(1)
+  } else {
+    bins <- quantile(decimal_adjusted_values, probs = seq(0, 1, length.out = 6), na.rm = TRUE) %>% round(0)
+  }
+  
+  # Create the color palette
+  pal <- if (input$var_name_parks == "mindistance") {
+    colorBin('Blues', domain = decimal_adjusted_values, bins = bins, na.color = "#808080", reverse = TRUE)
+  } else {
+    colorBin('Blues', domain = decimal_adjusted_values, bins = bins, na.color = "#808080")
+  }
+  
+  # Create popup content for each polygon
+  popup_contents <- sprintf(
+    "<div style='font-size: 15px;'><strong>Block Group ID: %s</strong><br/>%g</div>",
+    phx$GEOID, decimal_adjusted_values
+  ) %>% lapply(htmltools::HTML)
+  
+  # Update the dynamic choropleth layer and legend on the map
+  leafletProxy("map_parks") %>%
+    clearGroup("choropleth") %>%  # Remove existing dynamic polygons
+    clearControls() %>%           # Remove the current legend
+    setView(lng = -112, lat = 33.4484, zoom = 10) %>%
+    addPolygons(data = phx,
+                group = "choropleth",   # New polygons are added to the "choropleth" group
+                stroke = TRUE,
+                smoothFactor = 0,
+                weight = 0.5,
+                opacity = 0.7,
+                color = "gray",
+                fillColor = ~pal(decimal_adjusted_values),
+                fillOpacity = 0.7,
+                layerId = ~GEOID,
+                highlightOptions = highlightOptions(
+                  stroke = TRUE,
+                  weight = 1.6,
+                  opacity = 1,
+                  color = "#00FFFF",
+                  bringToFront = TRUE),
+                popup = popup_contents,
+                popupOptions = popupOptions(closeButton = TRUE)
+    ) %>%
+    addLegend(position = 'topright',
+              pal = pal,
+              values = decimal_adjusted_values,
+              title = selected_label)
+})
+
+```
+
+Row {data-height=350}
+-------------------------------------------
+### Histogram
+
+```{r histogram-parks, context="server"}
+
+# Render the parks histogram as an interactive highchart
+output$parkHist <- renderHighchart({
+  req(input$var_name_parks)
+  
+  # Compute the adjusted values based on the selected park variable
+  decimal_adjusted_values <- if (input$var_name_parks == "mindistance") {
+    round(phx[[input$var_name_parks]], 0)
+  } else if (input$var_name_parks == "numparks") {
+    phx[[input$var_name_parks]]
+  } else if (input$var_name_parks == "sumacreage") {
+    # Use original values without taking the log
+    round(phx[[input$var_name_parks]], 1)
+  } else if (input$var_name_parks == "metro_ratio_1km_visits") {
+    round(phx[[input$var_name_parks]] * 100, 1)
+  } else {
+    round(phx[[input$var_name_parks]], 1)
+  }
+  
+  # Determine the label: if "sumacreage", use a custom label; otherwise, use the descriptive label
+  selected_label <- if (input$var_name_parks == "sumacreage") {
+    "Total acreage of local parks"
+  } else {
+    var_labels_parks[which(var_names_parks == input$var_name_parks)]
+  }
+  
+  # Compute histogram details:
+  if (input$var_name_parks == "sumacreage") {
+    # Compute breaks on the log scale, then convert back to original scale.
+    log_vals <- log(decimal_adjusted_values)
+    hist_obj <- hist(log_vals, breaks = "Scott", plot = FALSE, include.lowest = TRUE)
+    log_breaks <- hist_obj$breaks
+    breaks_original <- exp(log_breaks)
+    # Ensure the breaks span the full range of the data:
+    breaks_original[1] <- min(decimal_adjusted_values)
+    breaks_original[length(breaks_original)] <- max(decimal_adjusted_values)
+    h <- hist(decimal_adjusted_values, breaks = breaks_original, plot = FALSE, include.lowest = TRUE)
+  } else {
+    h <- hist(decimal_adjusted_values, breaks = "Scott", plot = FALSE, include.lowest = TRUE)
+  }
+  
+  # Create data points for the highchart:
+  data_points <- lapply(seq_along(h$counts), function(i) {
+    list(x = h$mids[i], y = h$counts[i])
+  })
+  
+  # Calculate the central value: use median for sumacreage, otherwise average
+  if (input$var_name_parks == "sumacreage") {
+    central_val <- median(decimal_adjusted_values, na.rm = TRUE)
+    central_label <- "Median"
+  } else {
+    central_val <- mean(decimal_adjusted_values, na.rm = TRUE)
+    central_label <- "Average"
+  }
+  
+  highchart() %>%
+    hc_chart(type = "column") %>%
+    hc_title(text = selected_label, align = "left") %>%
+    hc_xAxis(
+      type = if(input$var_name_parks == "sumacreage") "logarithmic" else "linear",
+      title = list(text = "Value"),
+      plotLines = list(
+        list(
+          value = central_val,
+          color = "black",
+          width = 2,
+          dashStyle = "Solid",
+          zIndex = 10,
+          label = list(
+            text = central_label,
+            align = "left",
+            style = list(color = "black")
+          )
+        )
+      )
+    ) %>%
+    hc_yAxis(title = list(text = "Number of CBGs")) %>%
+    hc_add_series(name = "Frequency", data = data_points, color = "#007bc2") %>%
+    hc_tooltip(pointFormat = "Frequency: {point.y}") %>%
+    hc_legend(enabled = FALSE) %>%
+    hc_add_theme(hc_theme_smpl())
+})
+
+# UI output for the highchart histogram
+highchartOutput("parkHist")
+
+
+```
+
+### Selected Block Group Demographic Z-Scores (click on the map to display chart)
+
+```{r, eval = TRUE}
+
+output$varZscoreChartParks <- renderHighchart({
+  
+  # Ensure blockgroup_data() exists before proceeding
+  req(blockgroup_data_parks())
+  
+  # Retrieve the selected block group data
+  bd <- blockgroup_data_parks()
+  
+  # Calculate z-scores for each variable based on the full phx dataset (2102 CBGs)
+  z_scores <- sapply(var_names_parks, function(var) {
+    global_mean <- mean(phx[[var]], na.rm = TRUE)
+    global_sd <- sd(phx[[var]], na.rm = TRUE)
+    (bd[[var]] - global_mean) / global_sd
+  })
+  
+  # Create a horizontal bar chart using highcharter: x-axis displays access & use variables,
+  # y-axis shows the calculated z-scores.
+  chart <- highchart() %>%
+    hc_chart(type = 'bar') %>%
+    hc_title(text = paste0("Census Block Group ", bd$GEOID, " Z-Scores"), align = "left") %>%
+    hc_xAxis(categories = var_labels_parks, 
+             title = list(text = "2019 Access & Use Variables")) %>%
+    hc_yAxis(title = list(text = "Z Score"),
+             plotLines = list(list(color = "gray", width = 2, value = 0, zIndex = 3))) %>%
+    hc_add_series(name = "Z Score", data = as.numeric(z_scores), color = "#007bc2") %>%
+    hc_tooltip(pointFormat = "Z Score: {point.y:.2f}") %>%
+    hc_legend(enabled = FALSE) %>%
+    hc_credits(
+  enabled = TRUE,
+  text = "Note: Z Score is calculated as (x - mean) / standard deviation",
+  style = list(fontSize = "12px", color = "#000000", cursor = "default", pointerEvents = "none"),
+  position = list(align = "left", verticalAlign = "bottom", x = 10, y = -10),
+  href = NULL
+) %>%
+    hc_add_theme(hc_theme_smpl())
+  
+  chart
+})
+
+# UI output for the highchart
+highchartOutput("varZscoreChartParks")
+
+```
+
+
+
+Local Park Choice Behavior
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r}
+
+library(openxlsx)
+
+file_url <- "https://github.com/youngjaewon/dashboard/raw/refs/heads/main/FinalData.0813.2023.xlsx"
+data <- read.xlsx( file_url, sheet = 'Data' )
+
+data <- data %>%
+  mutate(AvgAcreage = SumAcreage/NumParks1km, .after=SumAcreage) %>%
+  mutate(AvgAcreageLog = log(AvgAcreage+1), .after=AvgAcreage) %>%
+  mutate(SumAcreageLog = log(SumAcreage+1), .after=SumAcreage) %>%
+  mutate(MinDistLog = log(MinDist+1), .after=MinDist)
+
+covariates <- c("MinDistLog", "NumParks1km", "AvgAcreageLog", "under18", "over65", "prop_latino")
+
+colabs <- c(
+  "Distance to the nearest park",
+  "Number of local parks",
+  "Average size of local parks",
+  "% Children under 18",
+  "% Senior over 65",
+  "% Hispanic residents"
+)
+
+checkboxGroupInput(inputId="covariates", 
+              label = h3("Select Variables for Logistic Regression Model"),
+              choiceValues = covariates,
+              choiceNames = colabs,
+              selected=c("MinDistLog", "NumParks1km", "AvgAcreageLog")
+              )
+
+# Add the refresh button in the sidebar
+actionButton("refresh_map3", "Refresh Map")
+
+```
+
+<br>
+Use the __Local Park Choice Behavior__ tab to explore residents’ preferences for local parks in the Phoenix-Mesa urbanized area. This tab allows you to select independent variables and dynamically run logistic regression analyses. This functionality helps you assess how various neighborhood factors influence the likelihood of favoring local parks.
+
+Data sources: Trust for Public Land’s 2019 [ParkServe](https://www.tpl.org/parkserve/about), SafeGraph's 2019 [Patterns](https://docs.safegraph.com/docs/monthly-patterns)
+
+
+Column {data-width=50%}
+-------------------------------------
+### Logistic Regression Analysis
+
+```{r logit_model, results="asis"}
+
+  library(stargazer)
+  
+  # Define a named vector that maps variable names to custom labels
+  label_mapping <- c(
+    MinDistLog = "Distance to the nearest park (Log)",
+    NumParks1km = "Number of local parks",
+    AvgAcreageLog = "Average size of local parks (Log)",
+    under18 = "% Children under 18",
+    over65 = "% Senior over 65",
+    prop_latino = "% Hispanic residents"
+  )
+  
+  get_covariates <- reactive({ input$covariates })
+  
+  renderUI({
+    covariates <- get_covariates() 
+    
+    # Check that at least one covariate is selected
+    if(length(covariates) == 0) {
+      return(HTML("<div style='text-align:center; color:red;'>Please select at least one covariate.</div>"))
+    }
+    
+    formula.text <- paste0("MostIsLocal", " ~ ", paste(covariates, collapse = " + "))
+    fo <- as.formula(formula.text)
+    
+    logit <- glm(fo, data = data %>% filter(NumParks1km > 0), family = "binomial")
+    
+    # Dynamically generate custom labels for the selected covariates
+    custom_labels <- sapply(covariates, function(v) {
+      ifelse(v %in% names(label_mapping), label_mapping[[v]], v)
+    })
+    
+    HTML(
+      c("<br><br>",
+        "<div style='width: 60%; margin: 0 auto;'>",
+          stargazer(logit,
+                    type = "html",
+                    dep.var.labels = "Is Most Used Park Local?<br>(Yes=1 [Group 1] / No=0 [Group 2])",
+                    covariate.labels = custom_labels,
+                    star.cutoffs = c(0.05, 0.01, 0.001)),
+        "</div>",
+        "<br><br>"
+      )
+    )
+  })
+  
+
+```
+  
+Column {data-width=50%}
+-------------------------------------
+### Illustration of Local Park Use Groups
+
+<figure>
+  <img src="https://github.com/youngjaewon/dashboard/blob/main/three_groups.jpg?raw=true" style="width:100%;" alt="Illustration of Groups">
+  <br>
+  <br>
+  <figcaption style="margin-top:1em;">
+    <strong>Illustration of Groups Based on Different Uses of Local Parks.</strong> <em>Note</em>: Squares represent CBGs, dashed circles represent the CBG’s 1 km buffer zone (walking distance), triangles represent parks (green triangles = local, white triangles = non-local), and arrows represent the most visited parks by residents in each CBG.
+    <ul>
+      <li>Group 1: CBGs where residents’ most visited park is local.</li>
+      <li>Group 2: CBGs that have local parks, but residents most frequently visit a non-local park.</li>
+      <li>Group 3: CBGs without local parks (these were excluded from the logit analysis).</li>
+    </ul>
+  </figcaption>
+</figure>
+
+### Local Park Use Groups in the Phoenix-Mesa Urbanized Area
+
+```{r leaflet-map-use-groups, context="server"}
+
+phx <- phx %>%
+  # Convert the GEOID column to numeric
+  mutate(GEOID = as.numeric(GEOID)) %>%
+  # Join with selected columns (GEOID and Group3) from data
+  left_join(data %>% select(GEOID, Group3), by = "GEOID") %>%
+  filter(!is.na(Group3))
+
+# Define renderLeaflet
+output$map_use_groups <- renderLeaflet({
+  
+    # Define a color palette based on the three possible Group3 values
+    # Adjust the colors as needed
+    pal <- colorFactor(
+      palette = c("#2268E5", "#FFA400", "lightgray"),
+      domain = phx$Group3
+    )
+    
+      popup_contents <- sprintf(
+    "<div style='font-size: 15px;'><strong>Block Group ID: %s</strong><br/>Group %g</div>",
+    phx$GEOID, phx$Group3
+  ) %>% lapply(htmltools::HTML)
+  
+    # Define a mapping from Group3 numeric values to custom text labels
+    custom_mapping <- c("1" = "Group 1 (CBGs that used local parks the most)",
+                        "2" = "Group 2 (CBGs that used non-local parks the most)",
+                        "3" = "Group 3 (CBGs with no local parks)")
+
+    leaflet(phx) %>%
+    setView(lng = -112, lat = 33.48, zoom = 10) %>%
+      # Add a basemap from CartoDB
+    addProviderTiles('CartoDB.Positron') %>%
+    # Create a custom map pane for parks with a higher z-index
+    addMapPane("parksPane", zIndex = 420) %>%
+    addPolygons(stroke = TRUE,
+                smoothFactor = 0,
+                weight = 0.5,
+                opacity = 0.7,
+                color = "gray",
+                fillColor = ~pal(Group3),  # Use the palette to assign colors
+                fillOpacity = 0.7,
+                layerId = ~GEOID,
+                highlightOptions = highlightOptions(
+                  stroke = TRUE,
+                  weight = 1.6,
+                  opacity = 1,
+                  color = "#00FFFF",
+                  bringToFront = TRUE),
+                popup = popup_contents,
+                popupOptions = popupOptions(
+                  closeButton = TRUE)) %>%
+        # Add the parks layer after the choropleth so it appears on top when activated
+    addPolygons(
+      data = parks,
+      group = "Parks",              # Group name for layer control
+      color = "green",              # Border color for parks
+      fillColor = "green",          # Fill color for parks
+      fillOpacity = 0.5,
+      weight = 2,
+      options = pathOptions(pane = "parksPane"),  # Assign to the custom parks pane
+      popup = ~paste("Park Name:", Park_Name)
+    ) %>%
+    # Add a layers control to toggle the parks layer on/off
+    addLayersControl(
+      overlayGroups = c("Parks"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    # Hide the parks layer by default
+    hideGroup("Parks") %>%
+    addLegend(
+      position = "bottomleft",
+      pal = pal,
+      values = phx$Group3,
+      title = "Local Park Use Groups",
+      # Override the default labels with custom text
+      labFormat = labelFormat(transform = function(x) {
+        custom_mapping[as.character(x)]
+      }),
+      opacity = 1
+    )
+    
+})
+
+# Place the UI output for the map
+leafletOutput("map_use_groups")
+
+
+observeEvent(input$refresh_map3, {
+  # Re-calculate the color palette and popup contents using the current phx data
+  pal <- colorFactor(
+    palette = c("#2268E5", "#FFA400", "lightgray"),
+    domain = phx$Group3
+  )
+  
+  popup_contents <- sprintf(
+    "<div style='font-size: 15px;'><strong>Block Group ID: %s</strong><br/>Group %g</div>",
+    phx$GEOID, phx$Group3
+  ) %>% lapply(htmltools::HTML)
+  
+  # Re-define the custom mapping (if needed)
+  custom_mapping <- c("1" = "Group 1 (CBGs that used local parks the most)",
+                      "2" = "Group 2 (CBGs that used non-local parks the most)",
+                      "3" = "Group 3 (CBGs with no local parks)")
+  
+  # Clear shapes and controls from the map
+  leafletProxy("map_use_groups") %>%
+    clearShapes() %>%
+    clearControls() %>%
+    setView(lng = -112, lat = 33.48, zoom = 10) %>%
+    # Re-add the polygons
+    addPolygons(
+      data = phx,
+      stroke = TRUE,
+      smoothFactor = 0,
+      weight = 0.5,
+      opacity = 0.7,
+      color = "gray",
+      fillColor = ~pal(Group3),
+      fillOpacity = 0.7,
+      layerId = ~GEOID,
+      highlightOptions = highlightOptions(
+        stroke = TRUE,
+        weight = 1.6,
+        opacity = 1,
+        color = "#00FFFF",
+        bringToFront = TRUE),
+      popup = popup_contents,
+      popupOptions = popupOptions(closeButton = TRUE)
+    ) %>%
+    addPolygons(
+      data = parks,
+      group = "Parks",              # Group name for layer control
+      color = "green",              # Border color for parks
+      fillColor = "green",          # Fill color for parks
+      fillOpacity = 0.5,
+      weight = 2,
+      options = pathOptions(pane = "parksPane"),  # Assign to the custom parks pane
+      popup = ~paste("Park Name:", Park_Name)
+    ) %>%
+    # Add a layers control to toggle the parks layer on/off
+    addLayersControl(
+      overlayGroups = c("Parks"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    # Hide the parks layer by default
+    hideGroup("Parks") %>%
+    addLegend(
+      position = "bottomleft",
+      pal = pal,
+      values = phx$Group3,
+      title = "Local Park Use Groups",
+      labFormat = labelFormat(transform = function(x) {
+        custom_mapping[as.character(x)]
+      }),
+      opacity = 1
+    )
+})
+
+```
+
+About
+===================================== 
+
+Since 2018, Prof. Yushim Kim, colleagues, and students at Arizona State University have published a series of studies on urban greening in Phoenix and other regions (e.g., Chicago, Los Angeles). This dashboard, created by Dr. Youngjae Won, visualizes access to and use of green space in the Phoenix-Mesa urbanized area, which was published in *Landscape and Urban Planning* (2023, 2025). See the list of papers below. Data used for these papers can be accessed via GitHub:
+
+
+The list also includes research on urban greening from multiple angles such as environmental justice, environmental planning, and green gentrification, using a variety of data (spatial data, satellite imagery data, SafeGraph human mobility data, tree data) and developing tools and techniques (spatial regression models and qualitative comparative analysis). Student authors are underlined.
+
+1. <u>Kim, J.</u>, <u>Won, Y.</u>, Kim, Y., & Corley, E. (2025) Preferring local over non-local green spaces: Green space visit patterns by residents in desert cities, Arizona. *Landscape and Urban Planning*. https://doi.org/10.1016/j.landurbplan.2024.105292
+
+2. Stuhlmacher, M., & Kim, Y. (2024). The unequal connectivity of parks and tree canopy in 10 US cities. *Urban Forestry & Urban Greening*. https://doi.org/10.1016/j.ufug.2024.128332
+
+3. Nelson, J., <u>Won, Y.</u>, <u>Kim, K.</u>, Stuhlmacher, M., & Kim, Y. (2024). Is the grass greener or the water bluer? Exploring drivers of local park visitation patterns in Phoenix, Arizona, *Urban Forestry & Urban Greening*. https://doi.org/10.1016/j.ufug.2024.128325
+
+4. <u>Kim, J.</u>, & Stuhlmacher, M. (2024). Clusters of conditions for green gentrification. In H. Campbell, A. Eckerd, & Y. Kim. (eds.) *Green Gentrification and Environmental Injustice: A Complexity Approach to Policy*. Springer (Book chapter)
+
+5. <u>Kim, J.</u>, Kim, Y., & Stuhlmacher, M. (2024). The greenspace dilemma: Pathways to greening with and without gentrification. *Journal of Urban Affairs*. https://doi.org/10.1080/07352166.2024.2326489
+
+6. Kim, Y., Corley, E.A., <u>Won, Y.</u>, & <u>Kim, J.</u> (2023). Green space access and visitation disparities in the Phoenix metropolitan area. *Landscape and Urban Planning*. https://doi.org/10.1016/j.landurbplan.2023.104805
+
+7. Stuhlmacher, M., Kim, Y., & <u>Kim, J.</u> (2022). The role of green space in Chicago’s gentrification. *Urban Forestry & Urban Greening*, 71, 127569. https://doi.org/10.1016/j.ufug.2022.127569
+
+8. Ahn, J.J., Kim, Y., Lucio, J., Corley, E., & Bentley, M. (2020). Green spaces and heterogeneous social groups in the U.S. *Urban Forestry & Urban Greening*, 49, 126637. https://doi.org/10.1016/j.ufug.2020.126637
+
+9. Corley, E.A., Ahn, J.J., Kim, Y., Lucio, J., <u>Rugland, E.</u>, & Molina, A. (2018). Conceptualizing lenses, dimensions, constructs and indicators for urban park quality. *Environmental Justice*, 11(6). https://doi.org/10.1089/env.2018.0017
+
+A new book, [*Green Gentrification and Environmental Justice: A Complexity Approach to Policy*](https://www.amazon.com/Green-Gentrification-Environmental-Injustice-Complexity-ebook/dp/B0D2BBVDQ5/ref=sr_1_1?crid=2J5YJG6X3NXRU&dib=eyJ2IjoiMSJ9.SQra984MCIFUV3c4hVCpIg.0QK_vH-UGgxXOVAZwl8pCXhkO8uTmM6zlq4llCE-zOY&dib_tag=se&keywords=Green+Gentrification+and+Environmental+Justice%3A+A+Complexity+Approach+to+Policy&qid=1737671273&sprefix=green+gentrification+and+environmental+justice+a+complexity+approach+to+policy+%2Caps%2C88&sr=8-1) by Heather Campbell, Adam Eckerd, & Yushim Kim, was just published by Springer.
+
+
+<style>
+
+.chart-shim { overflow: auto; }
+ 
+table{
+   border-spacing:1px;
+   margin-top:30px;
+   margin-bottom:30px;
+   margin-left: auto;
+   margin-right: auto;
+   align:center} 
+
+td{ padding: 6px 10px 6px 10px } 
+
+th{ text-align: left; } 
+
+
+</style>
